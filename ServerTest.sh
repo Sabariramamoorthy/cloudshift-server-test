@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
 # CloudShift Hardware Certification Tool
-# v1.1.0 - adds dependency auto-install, threshold enforcement, optional MinIO upload
+# v1.1.1 - adds dependency auto-install, threshold enforcement (no MinIO)
 #
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-VERSION='1.1.0'
+VERSION='1.1.1'
 BASE='/var/log/cloudshift-test'
 HOST=$(hostname -s)
 RUN=$(date -u +%Y%m%dT%H%M%SZ)
@@ -70,7 +70,6 @@ install_deps(){
     log "WARN: no known package manager; install manually: ${pkgs[*]}"
     return 1
   fi
-  # re-check
   MISSING=()
   for t in "${TOOLS[@]}"; do have "$t" || MISSING+=("$t"); done
 }
@@ -327,26 +326,5 @@ jq -n \
 log "JSON report: $OUT/report.json"
 log "Summary: $OUT/summary.txt"
 log "RESULT: $STATUS"
-
-# ---------- optional MinIO upload (offline-safe) ----------
-upload_to_minio(){
-  local envfile='/etc/cloudshift/reporter.env'
-  [[ -r "$envfile" ]] || { log "MinIO reporter env not found; skipping upload"; return 0; }
-  # shellcheck disable=SC1090
-  set -a; . "$envfile"; set +a
-  have mc || { log "mc not installed; skipping upload"; return 0; }
-  local prefix="${MINIO_PREFIX:-cloudshift}/${HOST}/${RUN}"
-  if ! mc alias set cloudshift "$MINIO_ENDPOINT" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" >/dev/null 2>&1; then
-    log "WARN: MinIO alias setup failed"; return 0
-  fi
-  ( cd "$OUT" && find . -type f -print0 | sort -z | xargs -0 sha256sum > manifest.sha256 )
-  if mc cp --recursive "$OUT/" "cloudshift/${MINIO_BUCKET}/${prefix}/" >/dev/null 2>&1; then
-    log "Uploaded report to ${MINIO_BUCKET}/${prefix}/"
-    mc cp "$OUT/report.json" "cloudshift/${MINIO_BUCKET}/${MINIO_PREFIX:-cloudshift}/${HOST}/latest.json" >/dev/null 2>&1 || true
-  else
-    log "WARN: MinIO upload failed"
-  fi
-}
-upload_to_minio
 
 [[ $FAIL -eq 0 && "$STATUS" != "FAIL" ]]
