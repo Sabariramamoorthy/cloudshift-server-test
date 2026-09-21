@@ -1,0 +1,216 @@
+Almost — but not quite, and the order matters. Let me give you the **exact, foolproof sequence**, plus the things that will bite you if you skip them.
+
+## What "3 files" means on the stick
+
+The `install.sh` I gave you expects this exact layout:
+
+```
+<USB root>/
+├── scripts/
+│   ├── cloudshift-test
+│   ├── cloudshift-test.sha256
+│   ├── install.sh
+│   └── cloudshift-collect.sh
+└── pull/          ← empty folder, but must exist
+```
+
+So: **3 scripts + 1 checksum + 1 empty folder**, inside a folder called `scripts`, plus an empty `pull` folder. If you just dump 3 files at the USB root, `install.sh` will fail with `No scripts dir at /mnt/stick/scripts`.
+
+**Minimum correct layout on the stick:**
+
+```
+E:\scripts\cloudshift-test
+E:\scripts\cloudshift-test.sha256
+E:\scripts\install.sh
+E:\scripts\cloudshift-collect.sh
+E:\pull\        (empty)
+```
+
+## The exact sequence on each Linux target
+
+```bash
+# 1. Insert the stick, then find its device name
+lsblk
+```
+
+You'll see something like:
+
+```
+NAME   MAJ:MIN RM  SIZE RO TYPE MOUNTPOINT
+sda      8:0    0  256G  0 disk
+└─sda1   8:1    0  256G  0 part /
+sdb      8:16   1   32G  0 disk          ← this is your stick
+└─sdb1   8:17   1   32G  0 part
+```
+
+Use the **partition** (`sdb1`), not the whole disk (`sdb`). If your stick has no partition (just `sdb` with no `sdb1`), use `sdb`.
+
+```bash
+# 2. Create mount point and mount
+sudo mkdir -p /mnt/stick
+sudo mount /dev/sdb1 /mnt/stick
+
+# 3. Sanity check — you should see 'scripts' and 'pull'
+ls -l /mnt/stick/
+
+# 4. Install scripts
+sudo bash /mnt/stick/scripts/install.sh
+
+# 5. Run the certification (~31 min — DO NOT interrupt)
+sudo cloudshift-test
+
+# 6. Copy reports back to the stick
+sudo cloudshift-collect
+
+# 7. Unmount before pulling the stick
+sudo umount /mnt/stick
+```
+
+That's the whole workflow. **After unmount**, the USB is safe to remove.
+
+## But — three things that will actually bite you
+
+### 1. The current `/usr/local/bin/cloudshift-test` is still v1.1.0 with MinIO
+
+You haven't confirmed the swap. Before anything else, run this on the target:
+
+```bash
+grep '^VERSION=' /usr/local/bin/cloudshift-test
+grep -c upload_to_minio /usr/local/bin/cloudshift-test
+```
+
+- Want: `VERSION='1.1.1'` and `0`
+- If it says `1.1.0` and `1` (or more), the stick is about to install the **old** script and the version mismatch will persist.
+
+When `install.sh` runs from the stick, it **overwrites** `/usr/local/bin/cloudshift-test` with whatever is at `scripts/cloudshift-test` on the stick. So make sure the file **on the stick** is the v1.1.1 version (no MinIO block). The one in your last message is **still v1.1.0 with MinIO** — replace it with the v1.1.1 block I gave you.
+
+### 2. USB device name is not always `sdb1`
+
+It could be `sdc1`, `sdd1`, etc., depending on what disks the machine already has. **Never guess.** Always:
+
+```bash
+lsblk -o NAME,SIZE,LABEL,MOUNTPOINT,FSTYPE
+```
+
+Pick the line that says **removable** with your stick's size and no mountpoint.
+
+If your stick has a label (e.g. `CLOUDSHIFT`), you can mount by label:
+
+```bash
+sudo mount LABEL=CLOUDSHIFT /mnt/stick
+```
+
+Cleaner and avoids the `sdX` guessing game. Format/label the stick once on Windows:
+
+- Right-click USB in Explorer → **Format** → name it `CLOUDSHIFT` → **exFAT** or **FAT32**
+- Then on Linux: `sudo mount LABEL=CLOUDSHIFT /mnt/stick`
+
+### 3. If `/mnt/stick/pull` doesn't exist, `cloudshift-collect` aborts
+
+The collect script has:
+
+```bash
+[[ -d "$PULL" ]] || { echo "No pull dir at $PULL — is the stick mounted?"; exit 1; }
+```
+
+So either:
+
+- Create `pull\` on the stick from Windows once (recommended), **or**
+- Let `cloudshift-collect` create it — but the current script doesn't. Either:
+  - Add `mkdir -p "$PULL"` right after `PULL=...` in `cloudshift-collect.sh`, or
+  - Just `mkdir` it from Linux before running collect:
+    ```bash
+    sudo mkdir -p /mnt/stick/pull
+    ```
+
+Simplest fix: put an empty `pull` folder on the stick from Windows now, and it's done.
+
+## Optional: one-liner for the whole flow
+
+If you want a single command to run on each target (after inserting the stick), paste this — it does **everything** including mounting and unmounting, and prompts you if it can't figure out the device:
+
+```bash
+STICK_LABEL=CLOUDSHIFT
+sudo bash -c '
+set -Eeuo pipefail
+LABEL="${STICK_LABEL:-CLOUDSHIFT}"
+mkdir -p /mnt/stick
+mount LABEL="$LABEL" /mnt/stick || { echo "Cannot mount LABEL=$LABEL — check lsblk"; exit 1; }
+trap "umount /mnt/stick 2>/dev/null || true" EXIT
+
+echo "==> Installing from /mnt/stick/scripts"
+bash /mnt/stick/scripts/install.sh
+
+echo "==> Running cert (~31 min)"
+/usr/local/bin/cloudshift-test || true
+
+echo "==> Copying reports back"
+/usr/local/bin/cloudshift-collect
+
+echo "==> Done. Unmounting."
+'
+```
+
+The `trap ... EXIT` handles unmount even if something fails partway.
+
+## Pre-flight on Windows, before you leave your desk
+
+Do this once and the Linux side becomes a two-command job:
+
+1. **Format the stick** as **exFAT** or **FAT32**, label it **`CLOUDSHIFT`**.
+2. **Create the layout:**
+
+   ```
+   E:\scripts\
+   E:\pull\
+   ```
+
+3. **Copy into `E:\scripts\`:**
+   - `cloudshift-test` (v1.1.1, no MinIO — the version I just gave you)
+   - `cloudshift-test.sha256` (generated on a Linux box once, or on the first target)
+   - `install.sh`
+   - `cloudshift-collect.sh`
+
+4. **Fix line endings** (Notepad++ → Edit → EOL Conversion → Unix). Do this for all 4 files. If you skip this, every script will fail with `bash\r: No such file or directory`.
+
+5. **Confirm filenames** — the double `.sh.sh` in your earlier message means Explorer is hiding extensions. In Notepad++ **File → Save As**, set "Save as type" to **All types** and type the exact name including `.sh`.
+
+6. **Eject safely**, take the stick.
+
+## On each Linux target, the whole interaction is
+
+```bash
+sudo mount LABEL=CLOUDSHIFT /mnt/stick
+sudo bash /mnt/stick/scripts/install.sh
+sudo cloudshift-test
+sudo cloudshift-collect
+sudo umount /mnt/stick
+```
+
+That's it. Five commands. If you want it as a single line:
+
+```bash
+sudo mount LABEL=CLOUDSHIFT /mnt/stick && sudo bash /mnt/stick/scripts/install.sh && sudo cloudshift-test; sudo cloudshift-collect; sudo umount /mnt/stick
+```
+
+(Note the `;` instead of `&&` before `cloudshift-collect` — collect must run even if the cert "fails" at the threshold check, since the report is still written.)
+
+## Back at Windows
+
+```
+E:\pull\<hostname>\<UTC-timestamp>\
+```
+
+Read `summary.txt` for the verdict. If you want, zip each machine's folder and email/upload it.
+
+---
+
+**Before you go any further**, please do these two checks on the target you already have:
+
+```bash
+grep '^VERSION=' /usr/local/bin/cloudshift-test
+grep -c upload_to_minio /usr/local/bin/cloudshift-test
+ls -l /mnt/stick/scripts/    # once the stick is mounted
+```
+
+Paste the output, and I'll tell you whether the stick is ready or still has the stale v1.1.0 file. Then we're set — you can run the 5-command flow on every machine.
